@@ -61,6 +61,36 @@ def compute_normalization_stats(data, method='robust', clip_std=4.0, eps=1e-8):
     return mean, std
 
 
+def compute_sample_wise_stats(data, eps=1e-8):
+    """
+    Compute normalization statistics per-sample for test-time adaptation.
+
+    Args:
+        data: numpy array of shape (N, T, C, F) or (T, C, F)
+        eps: epsilon for numerical stability
+
+    Returns:
+        mean, std: arrays matching input shape for broadcasting
+    """
+    if data.ndim == 3:
+        # Single sample (T, C, F) - compute over time
+        median = np.median(data, axis=0, keepdims=True)  # (1, C, F)
+        q75 = np.percentile(data, 75, axis=0, keepdims=True)
+        q25 = np.percentile(data, 25, axis=0, keepdims=True)
+        iqr = q75 - q25 + eps
+        scale = iqr / 1.35
+        return median, scale
+    else:
+        # Batch (N, T, C, F) - compute per sample over time
+        N, T, C, F = data.shape
+        median = np.median(data, axis=1, keepdims=True)  # (N, 1, C, F)
+        q75 = np.percentile(data, 75, axis=1, keepdims=True)
+        q25 = np.percentile(data, 25, axis=1, keepdims=True)
+        iqr = q75 - q25 + eps
+        scale = iqr / 1.35
+        return median, scale
+
+
 def normalize_data(data, mean, std, clip_std=4.0):
     """
     Normalize data using precomputed statistics.
@@ -219,7 +249,8 @@ class NeuroForecastDataset(Dataset):
         mean=None,
         std=None,
         is_train=True,
-        augment=False
+        augment=False,
+        sample_wise_norm=True  # NEW: Enable sample-wise normalization by default
     ):
         """
         Args:
@@ -228,11 +259,16 @@ class NeuroForecastDataset(Dataset):
             std: normalization std (if None, compute from data)
             is_train: whether this is training data
             augment: whether to apply data augmentation
+            sample_wise_norm: if True, normalize each sample independently (for cross-session generalization)
         """
         self.is_train = is_train
         self.augment = augment and is_train
+        self.sample_wise_norm = sample_wise_norm
 
-        # Compute or use provided normalization stats
+        # Store raw data for sample-wise normalization
+        self.raw_data = data.copy()
+
+        # Compute or use provided normalization stats (for backward compatibility)
         if mean is None or std is None:
             self.mean, self.std = compute_normalization_stats(
                 data,
@@ -244,13 +280,18 @@ class NeuroForecastDataset(Dataset):
             self.mean = mean
             self.std = std
 
-        # Normalize data
-        self.data = normalize_data(
-            data,
-            self.mean,
-            self.std,
-            clip_std=NORM_CONFIG['clip_std']
-        )
+        if sample_wise_norm:
+            # For sample-wise normalization, we normalize each sample on-the-fly in __getitem__
+            # Store raw data instead of pre-normalized data
+            self.data = data
+        else:
+            # Global normalization (original behavior)
+            self.data = normalize_data(
+                data,
+                self.mean,
+                self.std,
+                clip_std=NORM_CONFIG['clip_std']
+            )
 
         self.N, self.T, self.C, self.F = self.data.shape
 
@@ -267,6 +308,18 @@ class NeuroForecastDataset(Dataset):
             target_seq: tensor of shape (T_forecast, C) - last 10 steps, feature 0 only
         """
         sample = self.data[idx]  # (T, C, F)
+
+        # Apply sample-wise normalization if enabled
+        if self.sample_wise_norm:
+            # Compute per-sample statistics
+            sample_mean, sample_std = compute_sample_wise_stats(sample, eps=NORM_CONFIG['eps'])
+            # Normalize this sample
+            sample = normalize_data(
+                sample,
+                sample_mean,
+                sample_std,
+                clip_std=NORM_CONFIG['clip_std']
+            )
 
         # Split into input and target
         input_seq = sample[:INPUT_WINDOW, :, :].copy()  # (10, C, F)

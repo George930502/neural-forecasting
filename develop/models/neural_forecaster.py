@@ -283,6 +283,221 @@ class SpatioTemporalForecaster(nn.Module):
         return forecasts
 
 
+class ContrastiveLoss(nn.Module):
+    """
+    Contrastive learning loss for cross-session generalization.
+    Based on STNDT paper approach - learns session-invariant representations.
+
+    Uses InfoNCE-style contrastive loss on temporal embeddings:
+    - Positive pairs: same sample's embeddings across different augmentations
+    - Negative pairs: different samples within the batch
+    """
+
+    def __init__(self, temperature=0.1):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z1, z2):
+        """
+        Args:
+            z1: (B, D) - embeddings from first view
+            z2: (B, D) - embeddings from second view (augmented)
+
+        Returns:
+            loss: scalar contrastive loss
+        """
+        B = z1.shape[0]
+
+        # Normalize embeddings
+        z1 = nn.functional.normalize(z1, dim=1)
+        z2 = nn.functional.normalize(z2, dim=1)
+
+        # Compute similarity matrix
+        # z1 @ z2.T gives (B, B) where [i,j] = similarity(z1[i], z2[j])
+        sim_matrix = torch.mm(z1, z2.T) / self.temperature
+
+        # Positive pairs are on diagonal, negatives are off-diagonal
+        labels = torch.arange(B, device=z1.device)
+
+        # Cross-entropy loss treats diagonal as correct class
+        loss_12 = nn.functional.cross_entropy(sim_matrix, labels)
+        loss_21 = nn.functional.cross_entropy(sim_matrix.T, labels)
+
+        return (loss_12 + loss_21) / 2
+
+
+class SpatioTemporalForecasterV2(nn.Module):
+    """
+    Improved spatiotemporal forecasting model with contrastive learning support.
+
+    Improvements based on STNDT and NDT papers:
+    1. Better spatial-temporal fusion (multiplicative instead of additive)
+    2. Projection head for contrastive learning
+    3. Higher dropout for better generalization
+    """
+
+    def __init__(
+        self,
+        num_channels,
+        input_features=9,
+        feature_embed_dim=64,
+        spatial_hidden_dim=128,
+        spatial_num_heads=4,
+        spatial_num_layers=2,
+        spatial_dropout=0.3,  # Increased from 0.1
+        spatial_attention_dropout=0.2,  # Increased
+        temporal_hidden_dim=256,
+        temporal_num_heads=8,
+        temporal_num_layers=3,
+        temporal_dropout=0.3,  # Increased from 0.1
+        forecast_hidden_dims=[256, 128],
+        forecast_dropout=0.3,  # Increased
+        input_window=10,
+        forecast_window=10,
+        use_spectral_norm=True,
+        contrastive_dim=128  # Projection head dimension
+    ):
+        super().__init__()
+
+        self.num_channels = num_channels
+        self.input_features = input_features
+        self.input_window = input_window
+        self.forecast_window = forecast_window
+        self.use_spectral_norm = use_spectral_norm
+        self.temporal_hidden_dim = temporal_hidden_dim
+
+        # 1. Feature embedding: (B, T, C, F) -> (B, T, C, D_feat)
+        self.feature_embed = nn.Sequential(
+            nn.Linear(input_features, feature_embed_dim),
+            nn.LayerNorm(feature_embed_dim),
+            nn.GELU(),
+            nn.Dropout(spatial_dropout)
+        )
+
+        # 2. Spatial attention layers
+        self.spatial_layers = nn.ModuleList([
+            SpatialAttention(
+                feature_embed_dim,
+                num_heads=spatial_num_heads,
+                dropout=spatial_dropout,
+                attention_dropout=spatial_attention_dropout
+            )
+            for _ in range(spatial_num_layers)
+        ])
+
+        # Project to temporal dimension
+        self.spatial_to_temporal = nn.Linear(feature_embed_dim, temporal_hidden_dim)
+
+        # 3. Temporal transformer
+        self.temporal_transformer = TemporalTransformer(
+            hidden_dim=temporal_hidden_dim,
+            num_heads=temporal_num_heads,
+            num_layers=temporal_num_layers,
+            dropout=temporal_dropout
+        )
+
+        # 4. Projection head for contrastive learning
+        self.projection_head = nn.Sequential(
+            nn.Linear(temporal_hidden_dim, temporal_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(temporal_hidden_dim, contrastive_dim)
+        )
+
+        # 5. Forecasting head with spectral normalization
+        forecast_layers = []
+        in_dim = temporal_hidden_dim
+
+        for hidden_dim in forecast_hidden_dims:
+            linear = nn.Linear(in_dim, hidden_dim)
+            if use_spectral_norm:
+                linear = nn.utils.spectral_norm(linear)
+
+            forecast_layers.extend([
+                linear,
+                nn.LayerNorm(hidden_dim),
+                nn.GELU(),
+                nn.Dropout(forecast_dropout)
+            ])
+            in_dim = hidden_dim
+
+        # Final projection to forecast window
+        final_linear = nn.Linear(in_dim, forecast_window)
+        if use_spectral_norm:
+            final_linear = nn.utils.spectral_norm(final_linear)
+        forecast_layers.append(final_linear)
+
+        self.forecast_head = nn.Sequential(*forecast_layers)
+
+    def encode(self, x):
+        """
+        Encode input to latent representation for contrastive learning.
+
+        Args:
+            x: (B, T_in, C, F)
+
+        Returns:
+            z: (B, D) - latent representation
+            x_combined: (B, T, C, D_temp) - full spatiotemporal features
+        """
+        B, T, C, F = x.shape
+
+        # 1. Feature embedding
+        x = self.feature_embed(x)
+
+        # 2. Spatial attention
+        spatial_outputs = []
+        for t in range(T):
+            x_t = x[:, t, :, :]
+            for spatial_layer in self.spatial_layers:
+                x_t = spatial_layer(x_t)
+            spatial_outputs.append(x_t)
+
+        x = torch.stack(spatial_outputs, dim=1)
+
+        # 3. Project to temporal dimension
+        x = self.spatial_to_temporal(x)
+
+        # 4. Aggregate and temporal transform
+        x_agg = x.mean(dim=2)  # (B, T, D_temp)
+        x_agg = self.temporal_transformer(x_agg)
+
+        # Channel-specific features
+        x_agg_expanded = x_agg.unsqueeze(2).expand(-1, -1, C, -1)
+        x_combined = x + x_agg_expanded  # (B, T, C, D_temp)
+
+        # Latent representation (mean over time and channels)
+        z = x_combined.mean(dim=(1, 2))  # (B, D_temp)
+
+        return z, x_combined
+
+    def forward(self, x, return_embedding=False):
+        """
+        Args:
+            x: (B, T_in, C, F)
+            return_embedding: if True, also return latent embedding for contrastive loss
+
+        Returns:
+            forecasts: (B, T_out, C)
+            z: (B, contrastive_dim) - only if return_embedding=True
+        """
+        z, x_combined = self.encode(x)
+        C = x_combined.shape[2]
+
+        # Use last timestep for forecasting
+        x_last = x_combined[:, -1, :, :]  # (B, C, D_temp)
+
+        # Forecast each channel
+        forecasts = self.forecast_head(x_last)  # (B, C, T_out)
+        forecasts = forecasts.transpose(1, 2)  # (B, T_out, C)
+
+        if return_embedding:
+            # Project to contrastive space
+            z_proj = self.projection_head(z)  # (B, contrastive_dim)
+            return forecasts, z_proj
+
+        return forecasts
+
+
 def count_parameters(model):
     """Count trainable parameters."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

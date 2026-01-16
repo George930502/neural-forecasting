@@ -52,39 +52,53 @@ MODEL_CONFIG = {
     'spatial_hidden_dim': 128,
     'spatial_num_heads': 4,
     'spatial_num_layers': 2,
-    'spatial_dropout': 0.2,  # Increased from 0.1
-    'spatial_attention_dropout': 0.15,  # New: attention-specific dropout
+    'spatial_dropout': 0.3,  # Increased for better generalization (STNDT/NDT guidance)
+    'spatial_attention_dropout': 0.2,  # Increased for regularization
 
     # Temporal modeling
     'temporal_hidden_dim': 256,
     'temporal_num_heads': 8,
     'temporal_num_layers': 3,
-    'temporal_dropout': 0.2,  # Increased from 0.1
+    'temporal_dropout': 0.3,  # Increased for better generalization
 
     # Forecasting head
     'forecast_hidden_dims': [256, 128],
-    'forecast_dropout': 0.25,  # Increased from 0.1
-    'use_spectral_norm': True,  # New: spectral normalization for forecast head
+    'forecast_dropout': 0.35,  # Increased for better generalization
+    'use_spectral_norm': True,  # Spectral normalization for forecast head
+
+    # Contrastive learning (for V2 model)
+    'contrastive_dim': 128,  # Projection head dimension
+    'contrastive_weight': 0.1,  # Weight for contrastive loss
+    'contrastive_temperature': 0.1,  # Temperature for contrastive loss
+}
+
+# V2 Model with higher dropout for cross-session generalization
+MODEL_CONFIG_V2 = {
+    **MODEL_CONFIG,
+    'spatial_dropout': 0.4,  # Higher dropout based on NDT paper (0.2-0.6 range)
+    'spatial_attention_dropout': 0.3,
+    'temporal_dropout': 0.4,
+    'forecast_dropout': 0.4,
 }
 
 # Training configuration
 TRAIN_CONFIG = {
     'batch_size': 32,
     'num_epochs': 100,
-    'learning_rate': 1e-3,
+    'learning_rate': 5e-4,  # Reduced from 1e-3 per paper insights (Transformers sensitive to LR)
     'weight_decay': 1e-3,  # Increased from 1e-4 for stronger L2 regularization
     'grad_clip': 1.0,
     'grad_accumulation_steps': 1,  # New: gradient accumulation for stable training
 
     # Learning rate schedule
     'scheduler': 'cosine',
-    'warmup_epochs': 5,
+    'warmup_epochs': 10,  # Increased from 5 for more gradual warmup
     'min_lr': 1e-6,
 
     # Early stopping
-    'patience': 10,  # Reduced from 15 for faster early stopping
+    'patience': 15,  # Increased from 10 to allow more training
     'min_delta': 1e-4,
-    'overfitting_threshold': 0.15,  # New: stop if train-val gap exceeds this
+    'overfitting_threshold': 0.5,  # Relaxed from 0.15 to allow longer training
 
     # Validation
     'val_split': 0.15,
