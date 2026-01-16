@@ -1,0 +1,91 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Data files (large)
+dataset/
+*.npz
+*.pkl
+*.npy
+*.mat
+
+# Model checkpoints (large)
+develop/checkpoints/
+*.pth
+
+# But keep submission files
+!develop/submission/*.npz
+!develop/submission/*.pth
+
+# Logs
+develop/logs/
+*.log
+
+# Papers (downloaded PDFs)
+papers/
+
+# Test submission
+develop/test_submission/
+
+# Submission zip
+*.zip
+
+# External challenge repo
+HDRChallenge_y2/
