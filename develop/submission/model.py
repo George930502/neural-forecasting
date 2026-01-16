@@ -316,6 +316,9 @@ class Model(torch.nn.Module):
         )
         self.model.load_state_dict(state_dict)
 
+        # Move model to device (GPU if available)
+        self.model.to(device)
+
     def predict(self, x):
         """
         Make predictions on input data.
